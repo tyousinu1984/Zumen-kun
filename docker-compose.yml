@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: zumen-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  go-backend:
+    build:
+      context: ./go-backend
+      dockerfile: Dockerfile
+    container_name: zumen-go-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - REDIS_URL=redis://redis:6379
+      - GO_PORT=8080
+      - GO_ENV=development
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./go-backend:/app
+    restart: unless-stopped
+
+  python-worker:
+    build:
+      context: ./python-worker
+      dockerfile: Dockerfile
+    container_name: zumen-python-worker
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - RETELL_API_KEY=${RETELL_API_KEY}
+      - RETELL_AGENT_ID=${RETELL_AGENT_ID}
+      - REDIS_URL=redis://redis:6379
+      - PYTHON_LOG_LEVEL=INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./python-worker:/app
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: zumen-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+    depends_on:
+      - go-backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    restart: unless-stopped
+
+volumes:
+  redis_data:
