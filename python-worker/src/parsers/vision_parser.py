@@ -1,141 +1,120 @@
-"""GPT-4o Vision parser for Japanese real estate property sheets (図面)."""
+"""Vision AI Router - 環境変数 VISION_PROVIDER で OpenAI / Gemini を切り替え。
 
-import json
+VISION_PROVIDER=openai  → GPT-4o Vision（画像ベース）
+VISION_PROVIDER=gemini  → Gemini 1.5 Pro（PDF直接 or 画像）
+VISION_PROVIDER=mock    → モックデータ（APIキー不要・開発用）
+"""
+
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from ..config import settings
 from ..models import ParsedPropertyData
 
 logger = logging.getLogger(__name__)
 
-# System prompt for parsing Japanese real estate documents
-PROPERTY_PARSE_SYSTEM_PROMPT = """あなたは日本の不動産図面（物件概要書）を解析する専門AIです。
-
-# タスク
-提供された画像から物件情報を正確に抽出し、JSON形式で返してください。
-
-# 抽出する情報
-以下のフィールドを探してください：
-
-1. **property_name** (物件名): マンション名・アパート名（例：鈴木ハイム、〇〇マンション）
-2. **room_number** (号室): 部屋番号（例：102、305号室）
-3. **phone_number** (電話番号): 管理会社・仲介業者の電話番号
-4. **price** (賃料): 月額家賃（数字のみ、単位：万円）
-5. **ad_rate** (広告料・AD): 
-   - 「広告料」「AD」「客付手数料」「客付AD」などのキーワードを探す
-   - 帯（Obi、図面下部の仲介業者情報部分）に記載されることが多い
-   - 例：「1ヶ月」「2ヶ月」「0.5ヶ月」「50%」など
-6. **floor_plan** (間取り): 部屋のタイプ（例：1K、1LDK、2LDK）
-7. **area** (専有面積): 例：「25.5㎡」「30.00m²」
-8. **building_age** (築年数・築年月): 例：「2010年3月」「築15年」
-9. **access** (アクセス): 最寄り駅・徒歩時間（例：「渋谷駅 徒歩5分」）
-
-# 重要な注意点
-- 「帯（Obi）」とは図面の下部にある細長い情報バー。仲介情報が記載されることが多い
-- **広告料（AD）の検索ワード**: 「客付手数料」「広告料」「AD」「client fee」
-- 情報が見つからない場合はnullを返す
-- 数字はできるだけ数値型で返す（賃料は万円単位の数値）
-
-# 出力形式（JSON）
-```json
-{
-  "property_name": "物件名またはnull",
-  "room_number": "号室またはnull",
-  "phone_number": "電話番号またはnull",
-  "price": 数値またはnull,
-  "ad_rate": "AD表示またはnull",
-  "floor_plan": "間取りまたはnull",
-  "area": "面積またはnull",
-  "building_age": "築年数またはnull",
-  "access": "アクセスまたはnull",
-  "raw_text": "画像から読み取ったメインテキストの要約"
-}
-```
-
-JSON以外の出力は一切不要です。"""
-
 
 async def parse_property_from_image(
     base64_image: str,
+    pdf_bytes: Optional[bytes] = None,
 ) -> Optional[ParsedPropertyData]:
     """
-    Use GPT-4o Vision to extract property information from image.
+    Parse property info from image (or PDF bytes for Gemini).
 
     Args:
-        base64_image: Base64 encoded PNG image
+        base64_image: Base64 PNG image (used by OpenAI and Gemini image mode)
+        pdf_bytes: Raw PDF bytes (used by Gemini PDF direct mode)
 
     Returns:
-        ParsedPropertyData object with extracted information
+        ParsedPropertyData or None
     """
-    if not settings.openai_api_key:
-        logger.warning("OpenAI API key not set, returning mock data")
+    provider = settings.vision_provider.lower()
+    logger.info(f"🤖 Vision provider: {provider}")
+
+    if provider == "gemini":
+        if pdf_bytes and settings.gemini_api_key:
+            # Gemini PDF direct mode (fastest - no image conversion needed)
+            logger.info("Using Gemini PDF direct mode")
+            from .gemini_vision import parse_with_gemini_pdf
+
+            results = await parse_with_gemini_pdf(
+                pdf_bytes, settings.gemini_api_key
+            )
+            # Return first result for single-page compatibility
+            return results[0] if results else None
+        elif settings.gemini_api_key:
+            # Gemini image mode
+            logger.info("Using Gemini image mode")
+            from .gemini_vision import parse_with_gemini_image
+
+            return await parse_with_gemini_image(
+                base64_image, settings.gemini_api_key
+            )
+        else:
+            logger.warning("GEMINI_API_KEY not set, falling back to mock")
+            return _mock_parsed_data()
+
+    elif provider == "openai":
+        if settings.openai_api_key:
+            logger.info("Using OpenAI GPT-4o Vision")
+            from .openai_vision import parse_with_openai
+
+            return await parse_with_openai(
+                base64_image, settings.openai_api_key
+            )
+        else:
+            logger.warning("OPENAI_API_KEY not set, falling back to mock")
+            return _mock_parsed_data()
+
+    else:
+        # mock mode or unknown provider
+        logger.info("Using mock data (VISION_PROVIDER=mock or not set)")
         return _mock_parsed_data()
 
-    try:
-        from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
+async def parse_all_pages_from_pdf(
+    pdf_bytes: bytes,
+    base64_images: List[str],
+) -> List[Optional[ParsedPropertyData]]:
+    """
+    Parse all pages from a PDF.
 
-        logger.info("Calling GPT-4o Vision API...")
+    Gemini PDF direct mode: 全ページを一括処理（高速）
+    OpenAI / Gemini image mode: ページごとに処理
 
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "system",
-                    "content": PROPERTY_PARSE_SYSTEM_PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{base64_image}",
-                                "detail": "high",  # High detail for small Japanese text
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": "この不動産図面から物件情報を抽出してください。特に「広告料」「客付手数料」「AD」の情報に注意してください。",
-                        },
-                    ],
-                },
-            ],
-            max_tokens=1000,
-            temperature=0.1,  # Low temperature for consistent extraction
-        )
+    Args:
+        pdf_bytes: Raw PDF bytes
+        base64_images: List of base64 PNG images (one per page)
 
-        content = response.choices[0].message.content
-        logger.info(f"GPT-4o response received: {content[:200]}...")
+    Returns:
+        List of ParsedPropertyData (one per page)
+    """
+    provider = settings.vision_provider.lower()
 
-        # Parse JSON response
-        # Remove markdown code blocks if present
-        content = content.strip()
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-
-        data = json.loads(content)
-        parsed = ParsedPropertyData(**data)
-
+    if provider == "gemini" and settings.gemini_api_key:
+        # Gemini PDF direct: send entire PDF at once → get all pages back
         logger.info(
-            f"Parsed property: {parsed.property_name}, AD: {parsed.ad_rate}"
+            f"🚀 Gemini PDF direct mode: processing all {len(base64_images)} pages at once"
         )
-        return parsed
+        from .gemini_vision import parse_with_gemini_pdf
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse GPT-4o JSON response: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"GPT-4o Vision API error: {e}")
-        return None
+        return await parse_with_gemini_pdf(pdf_bytes, settings.gemini_api_key)
+
+    else:
+        # OpenAI / Gemini image / mock: process page by page
+        logger.info(
+            f"📄 Processing {len(base64_images)} pages one by one (provider: {provider})"
+        )
+        results = []
+        for i, b64 in enumerate(base64_images):
+            logger.info(f"Parsing page {i+1}/{len(base64_images)}...")
+            result = await parse_property_from_image(b64)
+            results.append(result)
+        return results
 
 
 def _mock_parsed_data() -> ParsedPropertyData:
-    """Return mock data for development without OpenAI API key."""
+    """Return mock data for development without API key."""
     return ParsedPropertyData(
         property_name="サンプルマンション",
         room_number="101",
@@ -146,5 +125,5 @@ def _mock_parsed_data() -> ParsedPropertyData:
         area="25.0㎡",
         building_age="2018年3月",
         access="渋谷駅 徒歩5分",
-        raw_text="[開発モード: OpenAI APIキー未設定のためモックデータを返しています]",
+        raw_text="[開発モード: APIキー未設定のためモックデータを返しています]",
     )

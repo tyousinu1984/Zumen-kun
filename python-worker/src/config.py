@@ -15,6 +15,15 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str = ""
 
+    # Gemini
+    gemini_api_key: str = ""
+
+    # Vision AI Provider: "openai" | "gemini" | "mock"
+    # openai → GPT-4o Vision（画像ベース）
+    # gemini → Gemini 1.5 Pro（PDF直接対応・無料枠あり）
+    # mock   → APIキー不要（開発・テスト用）
+    vision_provider: str = "mock"
+
     # Retell AI
     retell_api_key: str = ""
     retell_agent_id: str = ""

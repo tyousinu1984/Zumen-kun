@@ -79,6 +79,9 @@ func main() {
 		c.JSON(http.StatusOK, status)
 	})
 
+	// Serve uploaded PDFs (開発環境用インメモリストア)
+	router.GET("/uploads/*filepath", handlers.ServeUploadedFile)
+
 	// API v1 routes
 	v1 := router.Group("/api/v1")
 	{

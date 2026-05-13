@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,6 +17,53 @@ import (
 	"github.com/zumen-kun/go-backend/internal/db/models"
 	"github.com/zumen-kun/go-backend/internal/redis"
 )
+
+// ─────────────────────────────────────────────────────────
+// In-memory PDF store (開発環境用: Supabase Storage の代替)
+// ─────────────────────────────────────────────────────────
+
+type pdfStore struct {
+	mu    sync.RWMutex
+	files map[string][]byte // key: "properties/{propertyID}/{filename}"
+}
+
+var globalPDFStore = &pdfStore{
+	files: make(map[string][]byte),
+}
+
+func (s *pdfStore) Save(key string, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.files[key] = data
+}
+
+func (s *pdfStore) Get(key string) ([]byte, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	data, ok := s.files[key]
+	return data, ok
+}
+
+// ServeFile handles GET /uploads/*filepath - serves in-memory PDFs
+func ServeUploadedFile(c *gin.Context) {
+	filePath := c.Param("filepath")
+	// Remove leading slash
+	filePath = strings.TrimPrefix(filePath, "/")
+
+	data, ok := globalPDFStore.Get(filePath)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+
+	c.Header("Content-Type", "application/pdf")
+	c.Header("Content-Disposition", "inline")
+	c.Data(http.StatusOK, "application/pdf", data)
+}
+
+// ─────────────────────────────────────────────────────────
+// PDF Handler
+// ─────────────────────────────────────────────────────────
 
 type PDFHandler struct {
 	db       *db.SupabaseClient
@@ -55,7 +103,7 @@ func (h *PDFHandler) UploadAndParse(c *gin.Context) {
 		return
 	}
 
-	// Generate unique filename
+	// Generate unique property ID and filename
 	propertyID := uuid.New().String()
 	ext := filepath.Ext(fileHeader.Filename)
 	storageFilename := fmt.Sprintf("properties/%s/%s%s",
@@ -64,34 +112,36 @@ func (h *PDFHandler) UploadAndParse(c *gin.Context) {
 		ext,
 	)
 
-	// Upload to Supabase Storage
-	fileURL, err := h.uploadToStorage(c, storageFilename, fileBytes)
-	if err != nil {
-		// If Supabase is not configured, use a placeholder URL for dev
-		fileURL = fmt.Sprintf("/uploads/%s", storageFilename)
+	// Try to upload to Supabase Storage first
+	fileURL, uploadErr := h.uploadToStorage(c, storageFilename, fileBytes)
+	if uploadErr != nil {
+		// Fallback: save to in-memory store and serve locally
+		globalPDFStore.Save(storageFilename, fileBytes)
+		// Use the go-backend internal URL so python-worker can fetch it via Docker network
+		fileURL = fmt.Sprintf("http://go-backend:8080/uploads/%s", storageFilename)
 	}
 
-	// Create property record
+	// Create property record in Supabase
 	property := &models.Property{
 		ID:     propertyID,
 		PDFURL: fileURL,
-		Status: "pending",
+		Status: "parsing",
 	}
 
-	if err := h.db.CreateProperty(c.Request.Context(), property); err != nil {
-		// In development mode without Supabase, just proceed
-		c.JSON(http.StatusOK, gin.H{
-			"property_id": propertyID,
-			"pdf_url":     fileURL,
-			"status":      "pending",
-			"message":     "Property created (development mode - Supabase not configured)",
-		})
+	dbErr := h.db.CreateProperty(c.Request.Context(), property)
+	if dbErr != nil {
+		// Log but continue - Redis task is more important in dev mode
+		fmt.Printf("⚠️  DB CreateProperty failed (dev mode): %v\n", dbErr)
+	}
+
+	// Push parse task to Redis (ALWAYS - regardless of DB/Storage errors)
+	if h.producer == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Redis not connected - cannot queue parse task"})
 		return
 	}
 
-	// Push parse task to Redis
 	if err := h.producer.PushParsePDFTask(c.Request.Context(), propertyID, fileURL); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue parse task"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to queue parse task: %v", err)})
 		return
 	}
 

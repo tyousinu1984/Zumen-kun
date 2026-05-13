@@ -18,8 +18,8 @@ import redis.asyncio as redis
 
 from .config import settings
 from .models import ParsePDFTask, VoiceCallTask
-from .parsers.pdf_parser import pdf_url_to_base64_image
-from .parsers.vision_parser import parse_property_from_image
+from .parsers.pdf_parser import pdf_url_to_base64_images
+from .parsers.vision_parser import parse_all_pages_from_pdf
 from .voice_agent.retell_client import (
     initiate_property_inquiry_call,
     summarize_call_transcript,
@@ -134,43 +134,85 @@ class ZumenWorker:
                 await asyncio.sleep(1)
 
     async def _process_parse_pdf(self, task: ParsePDFTask):
-        """Process a single PDF parsing task."""
+        """Process a PDF parsing task (multi-page support).
+
+        多ページ PDF の場合：
+          - 1ページ目 → task.property_id の既存レコードを更新
+          - 2ページ目以降 → Supabase に新規物件レコードを追加
+        """
         logger.info(
             f"🔍 Processing PDF parse for property: {task.property_id}"
         )
         start_time = time.time()
 
         try:
-            # Step 1: Convert PDF to base64 image
-            base64_image = pdf_url_to_base64_image(task.file_url, dpi=300)
+            # Step 1: Convert ALL PDF pages to base64 images
+            base64_images = pdf_url_to_base64_images(task.file_url, dpi=200)
 
-            if not base64_image:
-                raise ValueError("Failed to convert PDF to image")
+            if not base64_images:
+                raise ValueError("Failed to convert PDF to images")
 
-            # Step 2: Parse with GPT-4o Vision
-            parsed_data = await parse_property_from_image(base64_image)
+            logger.info(
+                f"📄 Processing {len(base64_images)} page(s) for {task.property_id}"
+            )
 
-            if not parsed_data:
-                raise ValueError("Failed to parse property data from image")
+            for page_idx, base64_image in enumerate(base64_images):
+                page_num = page_idx + 1
+                logger.info(
+                    f"🔍 Parsing page {page_num}/{len(base64_images)}..."
+                )
 
-            # Step 3: Update Supabase
-            updates = {
-                "status": "completed",
-                "name": parsed_data.property_name,
-                "room_number": parsed_data.room_number,
-                "phone_number": parsed_data.phone_number,
-                "price": parsed_data.price,
-                "ad_rate": parsed_data.ad_rate,
-            }
-            # Remove None values
-            updates = {k: v for k, v in updates.items() if v is not None}
+                try:
+                    # Step 2: Parse each page with GPT-4o Vision
+                    parsed_data = await parse_property_from_image(base64_image)
 
-            await self._update_property(task.property_id, updates)
+                    if not parsed_data:
+                        logger.warning(
+                            f"⚠️  No data extracted from page {page_num}, skipping"
+                        )
+                        continue
+
+                    updates = {
+                        "status": "completed",
+                        "name": parsed_data.property_name,
+                        "room_number": parsed_data.room_number,
+                        "phone_number": parsed_data.phone_number,
+                        "price": parsed_data.price,
+                        "ad_rate": parsed_data.ad_rate,
+                        "pdf_url": task.file_url,
+                    }
+                    # Remove None values
+                    updates = {
+                        k: v for k, v in updates.items() if v is not None
+                    }
+
+                    if page_idx == 0:
+                        # First page: update the existing property record
+                        await self._update_property(task.property_id, updates)
+                        logger.info(
+                            f"✅ Page 1 → updated property {task.property_id}: {parsed_data.property_name}"
+                        )
+                    else:
+                        # Additional pages: create new property records
+                        new_id = await self._create_property(updates)
+                        if new_id:
+                            logger.info(
+                                f"✅ Page {page_num} → created new property {new_id}: {parsed_data.property_name}"
+                            )
+                        else:
+                            logger.warning(
+                                f"⚠️  Page {page_num}: could not create new property (dev mode)"
+                            )
+
+                except Exception as page_err:
+                    logger.error(
+                        f"❌ Failed to parse page {page_num}: {page_err}"
+                    )
+                    continue
 
             elapsed = time.time() - start_time
             logger.info(
-                f"✅ PDF parsed successfully for {task.property_id} "
-                f"({elapsed:.1f}s): {parsed_data.property_name}"
+                f"✅ PDF multi-page parse completed for {task.property_id} ({elapsed:.1f}s)"
             )
 
         except Exception as e:
@@ -299,6 +341,28 @@ class ZumenWorker:
             )
         except Exception as e:
             logger.error(f"❌ Failed to update property {property_id}: {e}")
+
+    async def _create_property(self, data: dict) -> Optional[str]:
+        """Create a new property record in Supabase (for multi-page PDFs).
+        Returns the new property_id, or None in dev mode."""
+        import uuid as uuid_lib
+
+        new_id = str(uuid_lib.uuid4())
+        record = {"id": new_id, "status": "completed", **data}
+
+        if not self.supabase_client:
+            logger.info(
+                f"[DEV] Would create property {new_id}: {data.get('name', '?')}"
+            )
+            return None  # dev mode: no DB
+
+        try:
+            self.supabase_client.table("properties").insert(record).execute()
+            logger.info(f"✅ New property created: {new_id}")
+            return new_id
+        except Exception as e:
+            logger.error(f"❌ Failed to create property: {e}")
+            return None
 
     async def _save_call_record(
         self,
