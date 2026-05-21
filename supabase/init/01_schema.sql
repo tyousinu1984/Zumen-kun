@@ -6,10 +6,44 @@
 -- ============================================================
 
 -- ============================================================
+-- 会社テーブル
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.companies (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================================
+-- ユーザーテーブル
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.users (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id    UUID REFERENCES public.companies(id) ON DELETE CASCADE,
+  email         TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  role          TEXT NOT NULL DEFAULT 'user',   -- 'admin' or 'user'
+  display_name  TEXT,
+  is_active     BOOLEAN NOT NULL DEFAULT true,
+  created_at    TIMESTAMPTZ DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email      ON public.users(email);
+CREATE INDEX IF NOT EXISTS idx_users_company_id ON public.users(company_id);
+
+DROP TRIGGER IF EXISTS trigger_users_updated_at ON public.users;
+CREATE TRIGGER trigger_users_updated_at
+  BEFORE UPDATE ON public.users
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+-- ============================================================
 -- 物件情報テーブル
 -- ============================================================
+
 CREATE TABLE IF NOT EXISTS public.properties (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id     UUID REFERENCES public.companies(id) ON DELETE CASCADE,
   name           TEXT,
   room_number    TEXT,
   phone_number   TEXT,
@@ -18,6 +52,8 @@ CREATE TABLE IF NOT EXISTS public.properties (
   status         TEXT DEFAULT 'pending',
   foreigner_ok   BOOLEAN,
   pdf_url        TEXT,
+  source_pdf_id  UUID,            -- 元PDFの最初のproperty ID（ページジャンプ用）
+  page_number    INTEGER,          -- このレコードが何ページ目か
   created_at     TIMESTAMPTZ DEFAULT NOW(),
   updated_at     TIMESTAMPTZ DEFAULT NOW()
 );
@@ -144,12 +180,3 @@ EXCEPTION WHEN OTHERS THEN
   RAISE NOTICE 'Realtime setup skipped: %', SQLERRM;
 END $$;
 
--- ============================================================
--- サンプルデータ（開発用）
--- ============================================================
-INSERT INTO public.properties (name, room_number, phone_number, price, ad_rate, status)
-VALUES
-  ('サンプルマンション', '101', '03-1234-5678', 8.5,  '1ヶ月',   'completed'),
-  ('テストアパート',     '205', '06-9876-5432', 6.0,  '2ヶ月',   'pending'),
-  ('デモハイツ',         '302', '03-5555-0000', 12.0, '0.5ヶ月', 'parsing')
-ON CONFLICT DO NOTHING;

@@ -2,24 +2,23 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/zumen-kun/go-backend/internal/config"
 	"github.com/zumen-kun/go-backend/internal/db"
 	"github.com/zumen-kun/go-backend/internal/db/models"
-	"github.com/zumen-kun/go-backend/internal/redis"
+	"github.com/zumen-kun/go-backend/internal/worker"
 )
 
 type PropertyHandler struct {
-	db       *db.SupabaseClient
-	producer *redis.TaskProducer
+	db  *db.SupabaseClient
+	cfg *config.Config
 }
 
-func NewPropertyHandler(db *db.SupabaseClient, producer *redis.TaskProducer) *PropertyHandler {
-	return &PropertyHandler{
-		db:       db,
-		producer: producer,
-	}
+func NewPropertyHandler(db *db.SupabaseClient, cfg *config.Config) *PropertyHandler {
+	return &PropertyHandler{db: db, cfg: cfg}
 }
 
 // POST /api/v1/properties
@@ -126,7 +125,36 @@ func (h *PropertyHandler) DeleteProperty(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Property deleted successfully"})
 }
 
+// DELETE /api/v1/properties  (全削除)
+func (h *PropertyHandler) DeleteAllProperties(c *gin.Context) {
+	if err := h.db.DeleteAllProperties(c.Request.Context()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete all properties"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "All properties deleted"})
+}
+
+// DELETE /api/v1/properties/bulk  (複数削除)
+type BulkDeleteRequest struct {
+	IDs []string `json:"ids"`
+}
+
+func (h *PropertyHandler) BulkDeleteProperties(c *gin.Context) {
+	var req BulkDeleteRequest
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ids array is required"})
+		return
+	}
+
+	if err := h.db.DeleteBulkProperties(c.Request.Context(), req.IDs); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete properties"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Properties deleted", "count": len(req.IDs)})
+}
+
 // POST /api/v1/properties/:id/parse
+// Re-triggers parsing for an existing property using in-memory PDF store
 func (h *PropertyHandler) TriggerParse(c *gin.Context) {
 	id := c.Param("id")
 
@@ -141,19 +169,43 @@ func (h *PropertyHandler) TriggerParse(c *gin.Context) {
 		return
 	}
 
+	// in-memory store からPDFバイトを取得
+	const uploadsPrefix = "/uploads/"
+	pdfBytes := []byte(nil)
+	if idx := strings.Index(property.PDFURL, uploadsPrefix); idx >= 0 {
+		storageKey := property.PDFURL[idx+len(uploadsPrefix):]
+		if data, ok := globalPDFStore.Get(storageKey); ok {
+			pdfBytes = data
+		}
+	}
+
+	if len(pdfBytes) == 0 {
+		// PDFが見つからない場合はエラー（コンテナ再起動でメモリが消える）
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "PDF data not found in memory. Please re-upload the PDF file.",
+		})
+		return
+	}
+
 	// Update status to parsing
 	if err := h.db.UpdateProperty(c.Request.Context(), id, map[string]interface{}{"status": "parsing"}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update status"})
 		return
 	}
 
-	// Push task to Redis
-	if err := h.producer.PushParsePDFTask(c.Request.Context(), id, property.PDFURL); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue parse task"})
-		return
-	}
+	// Launch Gemini parse goroutine (non-blocking)
+	worker.StartParsePDF(worker.ParseJob{
+		PropertyID: id,
+		PDFBytes:   pdfBytes,
+		GeminiKey:  h.cfg.GeminiAPIKey,
+		DB:         h.db,
+	})
 
-	c.JSON(http.StatusOK, gin.H{"message": "Parse task queued successfully"})
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "AI re-parse started",
+		"pdf_url":     property.PDFURL,
+		"property_id": id,
+	})
 }
 
 // POST /api/v1/properties/:id/call
@@ -177,11 +229,31 @@ func (h *PropertyHandler) TriggerCall(c *gin.Context) {
 		return
 	}
 
-	// Push task to Redis
-	if err := h.producer.PushVoiceCallTask(c.Request.Context(), id, property.PhoneNumber, property.Name, property.RoomNumber); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue call task"})
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "AI call triggered (Retell AI integration pending)",
+		"property_id":   id,
+		"phone_number":  property.PhoneNumber,
+		"property_name": property.Name,
+	})
+}
+
+// POST /api/v1/properties/:id/cancel-call
+func (h *PropertyHandler) CancelCall(c *gin.Context) {
+	id := c.Param("id")
+
+	_, err := h.db.GetProperty(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Property not found"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Voice call task queued successfully"})
+	if err := h.db.UpdateProperty(c.Request.Context(), id, map[string]interface{}{"status": "pending"}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel call"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "Call cancelled",
+		"property_id": id,
+	})
 }

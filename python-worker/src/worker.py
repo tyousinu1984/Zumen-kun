@@ -19,7 +19,10 @@ import redis.asyncio as redis
 from .config import settings
 from .models import ParsePDFTask, VoiceCallTask
 from .parsers.pdf_parser import pdf_url_to_base64_images
-from .parsers.vision_parser import parse_all_pages_from_pdf
+from .parsers.vision_parser import (
+    parse_all_pages_from_pdf,
+    parse_property_from_image,
+)
 from .voice_agent.retell_client import (
     initiate_property_inquiry_call,
     summarize_call_transcript,

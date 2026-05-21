@@ -2,7 +2,7 @@ version: '3.8'
 
 # ============================================================
 # 図面くん (Zumen-kun) - Full Local Stack
-# ローカルSupabase + Redis + Go + Python + Next.js
+# ローカルSupabase + Go + Next.js
 # ============================================================
 
 services:
@@ -29,7 +29,6 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       JWT_SECRET: ${JWT_SECRET:-super-secret-jwt-token-with-at-least-32-characters-long}
-      # supabase/postgres 内部ロール用パスワード（全て統一）
       POSTGRES_SUPER_PASS: ${POSTGRES_PASSWORD:-postgres}
       API_EXTERNAL_URL: ${API_EXTERNAL_URL:-http://localhost:8000}
     volumes:
@@ -108,11 +107,6 @@ services:
     depends_on:
       supabase-db:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-sSfL", "--head", "-o", "/dev/null", "-H", "Authorization: Bearer ${ANON_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1sb2NhbCIsInJvbGUiOiJhbm9uIiwiZXhwIjoxOTgzODEyOTk2fQ.M5YxZEaHHJzS2YaxZ5KZokoZw7f4vGiOVu3_nsMln2c}", "http://localhost:4000/api/tenants/realtime-dev/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
     environment:
       PORT: 4000
       DB_HOST: supabase-db
@@ -195,7 +189,7 @@ services:
     container_name: zumen-supabase-kong
     restart: unless-stopped
     ports:
-      - "8000:8000/tcp"   # Supabase API エンドポイント
+      - "8000:8000/tcp"
       - "8443:8443/tcp"
     depends_on:
       supabase-db:
@@ -221,7 +215,7 @@ services:
     container_name: zumen-supabase-studio
     restart: unless-stopped
     ports:
-      - "3001:3000"   # http://localhost:3001 でアクセス
+      - "3001:3000"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/profile').then((r) => {if(r.status !== 200) throw new Error(r.status)})"]
       interval: 10s
@@ -264,23 +258,7 @@ services:
       PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
 
   # ============================================================
-  # Redis - タスクキュー
-  # ============================================================
-  redis:
-    image: redis:7-alpine
-    container_name: zumen-redis
-    ports:
-      - "6380:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ============================================================
-  # Go Backend - メインAPIサーバー
+  # Go Backend - メインAPIサーバー (Gemini 2.0 Flash 統合)
   # ============================================================
   go-backend:
     build:
@@ -292,39 +270,10 @@ services:
     environment:
       - SUPABASE_URL=http://supabase-kong:8000
       - SUPABASE_KEY=${SERVICE_ROLE_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1sb2NhbCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUiLCJleHAiOjE5ODM4MTI5OTZ9.-rXT2NgQv8gIdz_49xCuMdd7yxSr-H6zs3bv8jlx61I}
-      - REDIS_URL=redis://redis:6379
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GO_PORT=8080
       - GO_ENV=development
     depends_on:
-      redis:
-        condition: service_healthy
-      supabase-db:
-        condition: service_healthy
-    restart: unless-stopped
-
-  # ============================================================
-  # Python Worker - AI解析 & 音声電話
-  # ============================================================
-  python-worker:
-    build:
-      context: ./python-worker
-      dockerfile: Dockerfile
-    container_name: zumen-python-worker
-    ports:
-      - "8001:8001"
-    environment:
-      - SUPABASE_URL=http://supabase-kong:8000
-      - SUPABASE_KEY=${SERVICE_ROLE_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1sb2NhbCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUiLCJleHAiOjE5ODM4MTI5OTZ9.-rXT2NgQv8gIdz_49xCuMdd7yxSr-H6zs3bv8jlx61I}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - VISION_PROVIDER=${VISION_PROVIDER:-mock}
-      - RETELL_API_KEY=${RETELL_API_KEY:-}
-      - RETELL_AGENT_ID=${RETELL_AGENT_ID:-}
-      - REDIS_URL=redis://redis:6379
-      - PYTHON_LOG_LEVEL=INFO
-    depends_on:
-      redis:
-        condition: service_healthy
       supabase-db:
         condition: service_healthy
     restart: unless-stopped
@@ -336,11 +285,16 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      # NEXT_PUBLIC_* はビルド時不要（プロキシ経由のため）
+      # API_URL はランタイムで解決するので build args 不要
     container_name: zumen-frontend
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8082
+      # API_URL: Next.js サーバーサイドから Go Backend への接続先
+      # Docker ネットワーク内なのでサービス名で直接アクセス可能
+      - API_URL=http://go-backend:8080
+      # Supabase（ブラウザから直接アクセスするので NEXT_PUBLIC_ が必要）
       - NEXT_PUBLIC_SUPABASE_URL=http://localhost:8000
       - NEXT_PUBLIC_SUPABASE_ANON_KEY=${ANON_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1sb2NhbCIsInJvbGUiOiJhbm9uIiwiZXhwIjoxOTgzODEyOTk2fQ.M5YxZEaHHJzS2YaxZ5KZokoZw7f4vGiOVu3_nsMln2c}
     depends_on:
@@ -348,6 +302,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  redis_data:
   supabase_db_data:
   supabase_storage_data:

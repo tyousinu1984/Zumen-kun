@@ -40,7 +40,7 @@ async def parse_with_gemini_image(
         import google.generativeai as genai
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-pro")
+        model = genai.GenerativeModel("gemini-2.0-flash")
 
         logger.info("Calling Gemini Vision API (image mode)...")
 
@@ -89,7 +89,7 @@ async def parse_with_gemini_pdf(
         import google.generativeai as genai
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-pro")
+        model = genai.GenerativeModel("gemini-2.0-flash")
 
         logger.info(
             f"Calling Gemini Vision API (PDF direct mode, {len(pdf_bytes)} bytes)..."

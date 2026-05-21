@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { listProperties, type Property } from "@/lib/api-client";
+import { listProperties, deleteAllProperties, type Property } from "@/lib/api-client";
 import { PDFUploader } from "@/components/PDFUploader";
 import { PropertyTable } from "@/components/PropertyTable";
 import { StatsCards } from "@/components/StatsCards";
@@ -11,6 +11,7 @@ export default function DashboardPage() {
   const [properties, setProperties] = useState<Property[]>([]);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [realtimeStatus, setRealtimeStatus] = useState<"connecting" | "connected" | "disconnected">("connecting");
+  const [clearingAll, setClearingAll] = useState(false);
 
   // Fetch properties for stats
   const fetchProperties = useCallback(async () => {
@@ -33,10 +34,10 @@ export default function DashboardPage() {
       fetchProperties();
     });
 
-    // If supabase is not configured, still show UI
+    // 10秒以内に接続されなければポーリングモードに切り替え
     const timer = setTimeout(() => {
-      setRealtimeStatus("disconnected");
-    }, 3000);
+      setRealtimeStatus((s) => s === "connecting" ? "disconnected" : s);
+    }, 10000);
 
     return () => {
       unsubscribe();
@@ -45,10 +46,23 @@ export default function DashboardPage() {
   }, [fetchProperties]);
 
   const handleUploadSuccess = (propertyId: string) => {
-    // Trigger refresh after upload
     setTimeout(() => {
       setRefreshTrigger((t) => t + 1);
     }, 1000);
+  };
+
+  const handleClearAll = async () => {
+    if (properties.length === 0) return;
+    if (!confirm(`全 ${properties.length} 件の物件データを削除しますか？\nこの操作は元に戻せません。`)) return;
+    setClearingAll(true);
+    try {
+      await deleteAllProperties();
+      setRefreshTrigger((t) => t + 1);
+    } catch {
+      alert("全削除に失敗しました");
+    } finally {
+      setClearingAll(false);
+    }
   };
 
   return (
@@ -141,19 +155,41 @@ export default function DashboardPage() {
               </span>
             </h3>
           </div>
-          <button
-            onClick={() => setRefreshTrigger((t) => t + 1)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700 bg-white hover:bg-gray-50 border border-gray-200 rounded-lg transition-colors"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            更新
-          </button>
+          <div className="flex items-center gap-2">
+            {/* 全削除ボタン */}
+            {properties.length > 0 && (
+              <button
+                onClick={handleClearAll}
+                disabled={clearingAll}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors disabled:opacity-50"
+                title="全件削除"
+              >
+                {clearingAll ? (
+                  <span className="w-3 h-3 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  "🗑"
+                )}
+                全削除 ({properties.length}件)
+              </button>
+            )}
+            {/* 更新ボタン */}
+            <button
+              onClick={() => setRefreshTrigger((t) => t + 1)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700 bg-white hover:bg-gray-50 border border-gray-200 rounded-lg transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              更新
+            </button>
+          </div>
         </div>
 
-        <PropertyTable refreshTrigger={refreshTrigger} />
+        <PropertyTable
+          refreshTrigger={refreshTrigger}
+          onDataChange={(data) => setProperties(data)}
+        />
       </div>
 
       {/* Development Notice */}

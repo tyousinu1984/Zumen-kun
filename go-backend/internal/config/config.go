@@ -6,20 +6,20 @@ import (
 )
 
 type Config struct {
-	SupabaseURL string
-	SupabaseKey string
-	RedisURL    string
-	Port        string
-	Env         string
+	SupabaseURL   string
+	SupabaseKey   string
+	GeminiAPIKey  string
+	Port          string
+	Env           string
 }
 
 func Load() *Config {
 	cfg := &Config{
-		SupabaseURL: getEnv("SUPABASE_URL", ""),
-		SupabaseKey: getEnv("SUPABASE_KEY", ""),
-		RedisURL:    getEnv("REDIS_URL", "redis://localhost:6379"),
-		Port:        getEnv("GO_PORT", "8080"),
-		Env:         getEnv("GO_ENV", "development"),
+		SupabaseURL:  getEnv("SUPABASE_URL", ""),
+		SupabaseKey:  getEnv("SUPABASE_KEY", ""),
+		GeminiAPIKey: getEnv("GEMINI_API_KEY", ""),
+		Port:         getEnv("GO_PORT", "8080"),
+		Env:          getEnv("GO_ENV", "development"),
 	}
 
 	// Validate required fields
@@ -28,6 +28,9 @@ func Load() *Config {
 	}
 	if cfg.SupabaseKey == "" {
 		log.Println("WARNING: SUPABASE_KEY not set")
+	}
+	if cfg.GeminiAPIKey == "" {
+		log.Println("WARNING: GEMINI_API_KEY not set - PDF parsing will fail")
 	}
 
 	return cfg

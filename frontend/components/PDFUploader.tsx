@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { uploadAndParsePDF } from "@/lib/api-client";
 
@@ -12,6 +12,13 @@ export function PDFUploader({ onSuccess }: PDFUploaderProps) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  // 成功メッセージを5秒後に自動クリア
+  useEffect(() => {
+    if (!success) return;
+    const timer = setTimeout(() => setSuccess(null), 5000);
+    return () => clearTimeout(timer);
+  }, [success]);
 
   const onDrop = useCallback(
     async (acceptedFiles: File[]) => {
@@ -25,7 +32,7 @@ export function PDFUploader({ onSuccess }: PDFUploaderProps) {
       try {
         const result = await uploadAndParsePDF(file);
         setSuccess(
-          `✅ アップロード完了！物件ID: ${result.property_id.slice(0, 8)}... AI解析を開始しました。`
+          `✅ アップロード完了！AI解析中... (ID: ${result.property_id.slice(0, 8)}...)`
         );
         onSuccess?.(result.property_id);
       } catch (err) {
